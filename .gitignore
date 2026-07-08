@@ -10,3 +10,4 @@ CMakeLists.txt
 gltf_to_t3d
 website/html
 *.exe
+*.pak

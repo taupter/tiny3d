@@ -405,6 +405,8 @@ void t3d_model_draw_material(T3DMaterial *mat, T3DModelState *state)
       rdpq_tex_multi_end();
     }
 
+    rdpq_mode_begin();
+
     if(setCC) {
       state->lastCC = mat->colorCombiner;
       rdpq_mode_combiner(mat->colorCombiner);
@@ -433,7 +435,17 @@ void t3d_model_draw_material(T3DMaterial *mat, T3DModelState *state)
     if(setOtherMode) {
       __rdpq_mode_change_som(mat->otherModeMask, mat->otherModeValue);
       state->lastOtherMode = mat->otherModeValue;
+
+      // workaround for some libdragon changes that handles AA vs. no AA (maps to CVG * alpha)
+      // since we use the raw othermodes here it causes issues in not updating properly
+      if(mat->otherModeValue & SOM_ALPHACOMPARE_THRESHOLD) {
+        rdpq_mode_alphacompare(mat->blendColor.a);
+      } else {
+        rdpq_mode_alphacompare(0);
+      }
     }
+
+    rdpq_mode_end();
   }
 
   if(mat->renderFlags != state->lastRenderFlags) {
