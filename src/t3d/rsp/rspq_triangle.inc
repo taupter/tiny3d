@@ -329,7 +329,7 @@ RDPQ_Triangle_Send_Async:
     vrcph vslope_i.e7, vzero.e0;                lsv vw_f.e4, VTX_ATTR_Wf,vtx3
 
     # Compute ISH (H slope). 1/HY  (s14.1)
-    vrcp  vslope_f.e0, hy;                      slt t0, t0, zero
+    vrcp  vslope_f.e0, hy;       TAG_CullFlipA: slt t0, t0, zero
     vrcph vslope_i.e0, hy;                      beq t0, t1, JrRa
     # Compute ISM (M slope). 1/MY  (s14.1)
     vrcp  vslope_f.e2, my;                      # <delay slot>
@@ -368,7 +368,7 @@ RDPQ_Triangle_Send_Async:
     #    vhml      =   HX HY MX MY    LX LY  0  NZf
     #    vhmlupp   =    0 0  0  0     0  0   0  NZi
                                                 # Write left flag into tricmd
-    vmov vhml.e7, vnz_f.e0;                     xori t0, 1
+    vmov vhml.e7, vnz_f.e0;      TAG_CullFlipB: xori t0, 1
     vmov vhmlupp.e7, vnz_i.e0;                  sll t0, 7
 
     # vslopem2  = X/2 * (-4) = -2*X

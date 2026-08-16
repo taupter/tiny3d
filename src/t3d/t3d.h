@@ -645,6 +645,24 @@ void t3d_state_set_vertex_fx_scale(uint16_t scale);
 void t3d_state_set_lighting_mode(enum T3DLightingMode mode);
 
 /**
+ * Inverts the winding order used for backface culling.
+ * This flips the meaning of 'T3D_FLAG_CULL_FRONT' and 'T3D_FLAG_CULL_BACK' without
+ * having to re-emit the draw-flags. Having neither flag set (no culling) stays unaffected.
+ * The main use-case are mirrored models or viewports while still being able to record blocks.
+ * 
+ * NOTE:<br>
+ * Changing this mode internally patches the ucode.
+ * The process is not particularly expensive, but still a lot more than other settings.
+ * It should not be used on a per-material basis, but rather as a global setting you set once per scene or draw layer.
+ *
+ * Since the ucode is only refreshed on the next ucode switch, you have to make sure this happens before any draws.
+ * This can be done by making sure that after this call, and before the next vertex load, any RDPQ call was made.
+ *
+ * @param invert true to cull the opposite side, false for the default winding order
+ */
+void t3d_state_set_cull_invert(bool invert);
+
+/**
  * Sets a new address in the segment table.
  * This acts as a base-address for addresses in matrices/vertices
  * with a matching segment index.

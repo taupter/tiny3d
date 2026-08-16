@@ -31,6 +31,10 @@ static_assert(RSP_T3D_CODE_CLIPPING_CODE_TARGET == RSP_T3D_CODE_CLIP_clipTriangl
 // @TODO: this could be handled to allow either alignment, but it is simpler to force this for now
 static_assert((RSP_T3D_CODE_TAG_LightMul & 0x0FFF) % 8 == 0, "Light-Mul must be aligned to 8 bytes!");
 
+// the cull-flip patches sit inside the triangle code, which must never be swapped out by the clipping overlay
+static_assert(RSP_T3D_CODE_TAG_CullFlipA < RSP_T3D_CODE_CLIPPING_CODE_TARGET, "Cull-Flip-A must come before the clipping code!");
+static_assert(RSP_T3D_CODE_TAG_CullFlipB < RSP_T3D_CODE_CLIPPING_CODE_TARGET, "Cull-Flip-B must come before the clipping code!");
+
 DEFINE_RSP_UCODE(rsp_tiny3d);
 DEFINE_RSP_UCODE(rsp_tiny3d_clipping);
 uint32_t T3D_RSP_ID = 0;
@@ -47,6 +51,8 @@ static T3DMat4FP *matrixStack = NULL;
 static uint32_t clipCodeAddrOrg = 0; // 'CLIP_CODE_ORG_ADDR' in ucode
 
 static uint64_t orgInstrLightMul = 0; // backup of the lighting mul. instruction + the one after
+static uint64_t orgInstrCullFlipA = 0; // backup
+static uint64_t orgInstrCullFlipB = 0; // backup
 
 void t3d_init(T3DInitParams params)
 {
@@ -76,6 +82,9 @@ void t3d_init(T3DInitParams params)
 
   uint32_t imemAddrMul = (RSP_T3D_CODE_TAG_LightMul & 0x0FFF);
   orgInstrLightMul = *(uint64_t*)(rsp_tiny3d.code + imemAddrMul);
+
+  orgInstrCullFlipA = *(uint64_t*)(rsp_tiny3d.code + (RSP_T3D_CODE_TAG_CullFlipA & 0x0FF8));
+  orgInstrCullFlipB = *(uint64_t*)(rsp_tiny3d.code + (RSP_T3D_CODE_TAG_CullFlipB & 0x0FF8));
 
   T3D_RSP_ID = rspq_overlay_register(&rsp_tiny3d);
 }
@@ -120,6 +129,25 @@ inline static void t3d_dmem_set_u16(uint32_t addr, uint32_t value) {
 
 inline static void t3d_imem_patch(void* rdram, uint32_t opcode0, uint32_t opcode1) {
   rspq_write(T3D_RSP_ID, T3D_CMD_PATCH, PhysicalAddr(rdram), opcode0, opcode1);
+}
+
+/// @brief Fetches the original instruction at a tag out of its backed up 8-byte pair
+inline static uint32_t t3d_imem_org_instr(uint32_t tagAddr, uint64_t orgPair) {
+  return (tagAddr & 4) ? (uint32_t)orgPair : (uint32_t)(orgPair >> 32);
+}
+
+/**
+ * Patches a single instruction in the ucode
+ */
+inline static void t3d_imem_patch_instr(uint32_t tagAddr, uint64_t orgPair, uint32_t newInstr) {
+  uint64_t pair = (tagAddr & 4)
+    ? ((orgPair & 0xFFFF'FFFF'0000'0000ull) | newInstr)
+    : (((uint64_t)newInstr << 32) | (uint32_t)orgPair);
+
+  t3d_imem_patch(
+    rsp_tiny3d.code + (tagAddr & 0x0FF8),
+    (uint32_t)(pair >> 32), (uint32_t)pair
+  );
 }
 
 void t3d_metrics_fetch(T3DMetrics* data)
@@ -418,6 +446,28 @@ void t3d_state_set_lighting_mode(enum T3DLightingMode mode)
     rsp_tiny3d.code + imemAddrMul,
     (uint32_t)(newOpcodes >> 32),
     (uint32_t)(newOpcodes & 0xFFFF'FFFF)
+  );
+}
+
+void t3d_state_set_cull_invert(bool invert)
+{
+  // This needs two patches in 'RDPQ_Triangle_Send_Async':
+  //  A: the winding test "slt   t0, t0, zero" (nz < 0) becomes the complement:
+  //                      "sltiu t0, t0, 0x8000" (nz >= 0)
+  //  B: the same t0 is later re-used for the left-major flag, 
+  // where it gets negated with: "xori t0, 1". 
+  // Since A already flipped it, this has to become a no-op.
+  
+  const uint32_t OPCODE_SLTIU = 0x2D08'8000; // sltiu t0, t0, 0x8000
+
+  uint32_t orgA = t3d_imem_org_instr(RSP_T3D_CODE_TAG_CullFlipA, orgInstrCullFlipA);
+  uint32_t orgB = t3d_imem_org_instr(RSP_T3D_CODE_TAG_CullFlipB, orgInstrCullFlipB);
+
+  t3d_imem_patch_instr(RSP_T3D_CODE_TAG_CullFlipA, orgInstrCullFlipA,
+    invert ? OPCODE_SLTIU : orgA
+  );
+  t3d_imem_patch_instr(RSP_T3D_CODE_TAG_CullFlipB, orgInstrCullFlipB,
+    invert ? (orgB & ~1u) : orgB // clears the immediate, turning the `xori` into a no-op
   );
 }
 
