@@ -13,6 +13,7 @@ BUILD_DIR=build
 SOURCE_DIR=src/t3d
 
 INSTALLDIR=$(N64_INST)
+LIBDRAGON_PREVIEW=2
 
 include $(N64_INST)/include/n64.mk
 
