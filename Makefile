@@ -46,8 +46,8 @@ $(BUILD_DIR)/libt3d.a: $(OBJ)
 	$(N64_LD) -r -o $(BUILD_DIR)/libt3d.a $^
 
 $(BUILD_DIR)/libt3d.a: RSPASFLAGS+=$(N64_RSPASFLAGS)
-$(BUILD_DIR)/rsp/rsp_tiny3d.o: $(SOURCE_DIR)/rsp/rspq_triangle.inc
-$(BUILD_DIR)/rsp/rsp_tiny3d_clipping.o: $(SOURCE_DIR)/rsp/rspq_triangle.inc
+$(BUILD_DIR)/rsp/rsp_tiny3d.o: $(SOURCE_DIR)/rsp/rspq_triangle.inc $(SOURCE_DIR)/rsp/rspq_triangle_ref.inc $(SOURCE_DIR)/rsp/rspq_triangle_rspl.inc
+$(BUILD_DIR)/rsp/rsp_tiny3d_clipping.o: $(SOURCE_DIR)/rsp/rspq_triangle.inc $(SOURCE_DIR)/rsp/rspq_triangle_ref.inc $(SOURCE_DIR)/rsp/rspq_triangle_rspl.inc
 
 # RSP metadata
 $(SOURCE_DIR)/rsp/rsp_tiny3d.h: $(BUILD_DIR)/rsp/rsp_tiny3d.o $(BUILD_DIR)/rsp/rsp_tiny3d_clipping.o

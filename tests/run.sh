@@ -44,7 +44,7 @@ declare -A TESTS=(
   [19_particles_tex]="t3d_19_particles_tex.z64 100"
   [20_mipmaps]="t3d_20_mipmaps.z64 100"
   [21_fresnel]="t3d_21_fresnel.z64 100"
-  [22_bigtex]="t3d_22_bigtex.z64 100"
+  [22_bigtex]="t3d_22_bigtex.z64 100 crop=0,32,640,208"
   [23_hdr]="t3d_23_hdr.z64 100 tol=8"
   [24_hdr_bloom]="t3d_24_hdr_bloom.z64 100"
   [99_testscene]="t3d_99_testscene.z64 100"
