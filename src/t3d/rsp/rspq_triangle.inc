@@ -11,4 +11,3 @@
 
 // #include "./rspq_triangle_ref.inc"
 #include "./rspq_triangle_rspl.inc"
-#endif
