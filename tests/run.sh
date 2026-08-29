@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 ARES_TEST=${ARES_TEST:-ares-test}
 SNAPSHOTS=tests/snapshots
 
+rm -f "$SNAPSHOTS"/*actual.png
+
 # example directory -> "rom-file frames [options]"
 # Options (see snapshot.test.js):
 #   crop=X,Y,W,H  compare a subregion only (masks out timing-dependent overlays)
