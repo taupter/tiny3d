@@ -13,11 +13,18 @@ const [rom, snapshot, framesArg, ...rest] = ares.args;
 if (!rom || !snapshot) {
   throw new Error("usage: snapshot.test.js <rom.z64> <snapshot.png> <frames> [options]");
 }
-const frames = parseInt(framesArg || "100", 10);
-let update = false, tolerance = 0, window_ = 0;
+
+const RSP_WAIT_CMD = "Screen Size";
+
+const frames = parseInt(framesArg || "5", 10);
+let update = false;
+let tolerance = 0;
+let window_ = 0;
 let cropRect = [
   0, 1, 640, 240-2 // ignore first and last row since AA messes things up by sampling garbage data OOB
 ];
+
+
 for (const opt of rest) {
   if (opt === "--update") update = true;
   else if (opt.startsWith("crop=")) cropRect = opt.substring(5).split(",").map(Number);
@@ -29,6 +36,8 @@ for (const opt of rest) {
 ares.setRenderer("angrylion");
 ares.loadRom(rom);
 ares.resume();
+
+ares.waitRspCommand(RSP_WAIT_CMD, 2);
 
 function checkCrash() {
   // a crashed ROM shows a static exception screen, which must never
@@ -48,14 +57,14 @@ let snapshotImg = null;
 try { snapshotImg = ares.loadImage(snapshot); } catch (e) { /* no snapshot yet */ }
 
 if (update || snapshotImg === null) {
-  ares.waitFrames(frames);
+  ares.waitRspCommand(RSP_WAIT_CMD, frames);
   checkCrash();
   const shot = grab();
   shot.save(snapshot);
   console.log((snapshotImg === null ? "created" : "updated"), "snapshot:", snapshot,
               shot.width + "x" + shot.height, shot.sha256);
 } else {
-  ares.waitFrames(frames - window_);
+  ares.waitRspCommand(RSP_WAIT_CMD, frames - window_);
   checkCrash();
   let shot = grab();
   let cmp = shot.compare(snapshotImg, tolerance);
