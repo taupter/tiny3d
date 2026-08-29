@@ -1,13 +1,12 @@
 const frames = 30;
-const shotPath = ares.args[1] || "rsp_profile.png";
 
 ares.setRenderer("angrylion");
 
 ares.loadRom("t3d_99_testscene.z64");
 ares.resume();
 
-ares.waitFrames(40);                      // skip boot/loading
-ares.waitRspCommand("Screen Size");       // align to a game-frame boundary
+ares.waitFrames(40);
+ares.waitRspCommand("Screen Size");
 ares.rspProfileStart();
 ares.waitRspCommand("Screen Size", frames);
 
@@ -61,7 +60,4 @@ for (const g of GROUPS) {
 }
 
 const shot = ares.screenshot();
-shot.save(shotPath);
-console.log("");
-console.log("screenshot: " + shotPath + " (" + shot.width + "x" + shot.height +
-            ", sha256 " + shot.sha256.substring(0, 16) + "...)");
+shot.save("rsp_profile.png");

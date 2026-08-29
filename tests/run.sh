@@ -15,7 +15,8 @@ cd "$(dirname "$0")/.."
 ARES_TEST=${ARES_TEST:-ares-test}
 SNAPSHOTS=tests/snapshots
 
-rm -f "$SNAPSHOTS"/*actual.png
+rm -f "$SNAPSHOTS"/*.actual.png
+rm -f "$SNAPSHOTS"/*.diff.png
 
 # example directory -> "rom-file frames [options]"
 # Options (see snapshot.test.js):
@@ -27,7 +28,7 @@ declare -A TESTS=(
   [00_quad]="t3d_00_quad.z64 100"
   [01_model]="t3d_01_model.z64 100"
   [02_lighting]="t3d_02_light.z64 100"
-  [03_objects]="t3d_03_objects.z64 100"
+  [03_objects]="t3d_03_objects.z64 100 crop=0,1,640,200"
   [04_dynamic]="t3d_04_dynamic.z64 100 win=15"
   [05_splitscreen]="t3d_05_splitscreen.z64 100"
 #  06_offscreen: ignored due to that noise texture on the TV

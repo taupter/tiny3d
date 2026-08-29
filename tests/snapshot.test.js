@@ -14,7 +14,10 @@ if (!rom || !snapshot) {
   throw new Error("usage: snapshot.test.js <rom.z64> <snapshot.png> <frames> [options]");
 }
 const frames = parseInt(framesArg || "100", 10);
-let update = false, cropRect = null, tolerance = 0, window_ = 0;
+let update = false, tolerance = 0, window_ = 0;
+let cropRect = [
+  0, 1, 640, 240-2 // ignore first and last row since AA messes things up by sampling garbage data OOB
+];
 for (const opt of rest) {
   if (opt === "--update") update = true;
   else if (opt.startsWith("crop=")) cropRect = opt.substring(5).split(",").map(Number);
@@ -37,7 +40,7 @@ function checkCrash() {
 
 function grab() {
   let shot = ares.screenshot();
-  if (cropRect) shot = shot.crop(cropRect[0], cropRect[1], cropRect[2], cropRect[3]);
+  shot = shot.crop(cropRect[0], cropRect[1], cropRect[2], cropRect[3]);
   return shot;
 }
 
@@ -69,7 +72,9 @@ if (update || snapshotImg === null) {
               "size", shot.width + "x" + shot.height, "sha256", shot.sha256);
   if (!cmp.match) {
     const actual = snapshot.replace(/\.png$/, ".actual.png");
+    const diff = snapshot.replace(/\.png$/, ".diff.png");
     shot.save(actual);
+    cmp.diff.save(diff);
     throw new Error("snapshot mismatch for " + rom + ": " + JSON.stringify(cmp) +
                     " (actual frame saved to " + actual + ")");
   }
