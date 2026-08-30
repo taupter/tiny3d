@@ -23,16 +23,20 @@ console.log("");
 console.log("command".padEnd(30) + "count".padStart(8) + "avg cyc".padStart(10) +
             "cyc/frame".padStart(12) + "us/frame".padStart(10) + "share".padStart(8));
 
+const perfMap = {};
 for (const r of t.rows) 
 {
   if(r.overlay !== 'tiny3d') continue;
   const name = r.overhead ? "rspq: " + r.overheadType
                           : (r.overlay ? r.overlay + "/" : "") + r.name;
+
+  const usPF = usPerFrame(r.cycles);
+  perfMap[name] = usPF;
   console.log(name.padEnd(30) +
               String(r.count).padStart(8) +
               r.avg.toFixed(1).padStart(10) +
               String(Math.round(r.cycles / frames)).padStart(12) +
-              usPerFrame(r.cycles).toFixed(1).padStart(10) +
+              usPF.toFixed(2).padStart(10) +
               ((r.cycles / t.totalCycles) * 100).toFixed(1).padStart(7) + "%");
 }
 
@@ -59,5 +63,25 @@ for (const g of GROUPS) {
               ((cycles / t.totalCycles) * 100).toFixed(1).padStart(7) + "%");
 }
 
-const shot = ares.screenshot();
-shot.save("rsp_profile.png");
+//const shot = ares.screenshot();
+//shot.save("rsp_profile.png");
+
+console.log("=========================================");
+//console.log(perfMap);
+const lastPerf = {"tiny3d/Tri Strip":3608.464,"tiny3d/Vert Load":2445.296,"tiny3d/Tri Seq":979.744,"tiny3d/Tri Draw":47.024,"tiny3d/Matrix Stack":17.12,"tiny3d/Proj Set":0.816,"tiny3d/Set Word":0.56,"tiny3d/Light Set":0.4341333333333333,"tiny3d/Screen Size":0.336,"tiny3d/Fog State":0.32,"tiny3d/Draw Flags":0.24};
+
+// now compare and check if something got slower:
+let foundWorse = false;
+for (const [name, usPF] of Object.entries(perfMap)) {
+  const last = lastPerf[name];
+  if (last === undefined) {
+    console.log("new: " + name + " " + usPF.toFixed(2) + " us/frame");
+  } else if (usPF > last) {
+    console.log("slower: " + name + " " + usPF.toFixed(2) + " us/frame (was " + last.toFixed(2) + ")");
+    foundWorse = true;
+  } else if (usPF < last) {
+    console.log("faster: " + name + " " + usPF.toFixed(2) + " us/frame (was " + last.toFixed(2) + ")");
+  }
+}
+
+if(!foundWorse)console.log("Performance OK");

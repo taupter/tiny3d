@@ -94,11 +94,7 @@ function RDPQ_Triangle_Send_Async(u32<$a0> vtx1, u32<$a1> vtx2, u32<$a2> vtx3, u
   vall2.w = vtx2;
   vall1.xy = load(vtx1, VTX_ATTR_XY).xy;
   vall2.xy = load(vtx2, VTX_ATTR_XY).xy;
-
-  AAA:
   vall3.w = vtx3;
-
-  
   vall3.xy = load(vtx3, VTX_ATTR_XY).xy;
 
   // Create a vector for negative pow2 constants
