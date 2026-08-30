@@ -126,7 +126,7 @@ state
   u32 SEGMENT_TABLE[8] = {0};
 
   // Lighting
-  u32 COLOR_AMBIENT[2];   // RGBA8 (duplicated) | <unused> (saved IMEM)
+  u32 COLOR_AMBIENT[2] = {0xFFFFFFFF, 0xFFFFFFFF};   // RGBA8 (duplicated) | <unused> (saved IMEM)
   alignas(4) u8 LIGHT_DIR_COLOR[LIGHT_SIZE][LIGHT_COUNT]; // RGBA8 (duplicated) | Direction packed as s8 (duplicated)
 
   // with profiling enabled, check assembly

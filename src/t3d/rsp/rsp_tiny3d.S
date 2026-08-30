@@ -156,7 +156,7 @@
     .align 2
     SEGMENT_TABLE: .word 0, 0, 0, 0, 0, 0, 0, 0
     .align 2
-    COLOR_AMBIENT: .ds.b 8
+    COLOR_AMBIENT: .word 0xFFFFFFFF, 0xFFFFFFFF
     .align 2
     #if RSPQ_PROFILE
     LIGHT_DIR_COLOR: .ds.b 32
