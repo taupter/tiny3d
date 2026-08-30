@@ -1,0 +1,758 @@
+// RSPL port of the hand-written 'rspq_triangle.inc' from libdragon
+// Registers are kept as in the original to not mess up code using it
+//
+// INPUT:
+// * a0,a1,a2: pointer to the triangle structures in DMEM
+// * v0: 0=cull front, 1=cull back, any other value = culling disabled
+// OUTPUT:
+// * s3: pointer to the end of the primitive in the output buffer
+// * s7: next output buffer offset (not pointer), either 0 or 176
+// CLOBBER:
+// * t0-t6, a0-a3 (+$at, $v01-$v28)
+
+// t3d-specific vertex layout (see 'rsp_tiny3d.rspl')
+#define VTX_ATTR_XY        0x00
+#define VTX_ATTR_Z         0x04
+#define VTX_ATTR_CLIPFLAGS 0x06
+#define VTX_ATTR_RGBA      0x08
+#define VTX_ATTR_ST        0x0C
+#define VTX_ATTR_Wi        0x16
+#define VTX_ATTR_Wf        0x1E
+#define VTX_ATTR_INVWi     0x20
+#define VTX_ATTR_INVWf     0x22
+
+#define RDP_CMD_MAX_SIZE 176
+#define RDPQ_DYNAMIC_BUFFER_SIZE 65536
+
+state
+{
+  // t3d state
+  extern u8 FACE_CULLING;
+  extern u32 TRI_COMMAND;
+  extern u16 RDPQ_TRI_BUFF_OFFSET;
+  extern u16 CLIP_BUFFER_TMP;
+  #ifdef T3D_METRICS
+    extern u32 SEGMENT_TABLE;
+  #endif
+
+  // libdragon rdpq state (rsp_queue.inc)
+  extern u32 RDPQ_CURRENT;
+  extern u32 RDPQ_SENTINEL;
+  extern u32 RDPQ_DYNAMIC_BUFFERS;
+  extern u8 RDPQ_SYNCFULL_ONGOING;
+}
+
+// libdragon function, sets a new RDP output buffer (destroys t0-t3)
+function RSPQCmd_RdpSetBuffer(u32<$a0> newBuf, u32<$a1> newBufStart, u32<$a2> newSentinel);
+
+/**
+ * Entry point of the triangle-draw command ('T3DCmd_TriDraw_Cmd' jumps here).
+ * Unpacks the third vertex pointer and loads the culling mode,
+ * then falls directly into 'RDPQ_Triangle_Send_Async'.
+ * Note: vert1 & vert2 are switched, this avoids an additional instruction here.
+ */
+@NoReturn
+function T3DCmd_TriDraw(u32<$a0> vert0, u32<$a1> vert1)
+{
+  u32<$a2> vert2 = vert1 >> 16;
+  u8<$v0> cullFlag = load(FACE_CULLING);
+}
+
+/**
+ * Build a RDP triangle primitive from 3 screen space vertices, and
+ * send it to the RDP for drawing (asynchronously). There is no need
+ * to call RDPQ_Send after this call.
+ *
+ * After this function returns, the DMA to RDRAM of the RDP primitive
+ * might be in progress. You can call this function multiple times for
+ * multiple triangles. After you finish the batch, make sure to call
+ * RDPQ_Triangle_Send_End to wait for the last triangle to finish sending
+ * to the RDP.
+ */
+function RDPQ_Triangle_Send_Async(u32<$a0> vtx1, u32<$a1> vtx2, u32<$a2> vtx3, u8<$v0> cull)
+{
+  #ifdef T3D_METRICS
+  {
+    u32<$t0> counter = load(SEGMENT_TABLE, 8);
+    counter += 1;
+    store(counter, SEGMENT_TABLE, 8);
+    undef counter;
+  }
+  #endif
+
+  // vall registers:
+  // X1 Y1 [-- ADDR1  -- -- -- --]
+  // X2 Y2 [-- ADDR2  -- -- -- --]
+  // X3 Y3 [-- ADDR3  -- -- -- --]
+  vec16<$v01> vall1;
+  vec16<$v02> vall2;
+  vec16<$v03> vall3;
+
+  // stash the vertex pointers in an unused lane, so that the
+  // sort below also sorts the pointers along with the positions
+  vall1.w = vtx1;
+  vall2.w = vtx2;
+  vall1.xy = load(vtx1, VTX_ATTR_XY).xy;
+  vall2.xy = load(vtx2, VTX_ATTR_XY).xy;
+  vall3.w = vtx3;
+  vall3.xy = load(vtx3, VTX_ATTR_XY).xy;
+
+  // Create a vector for negative pow2 constants
+  vec16<$v27> vmconst = VZERO - VSHIFT;
+
+  u16<$t3> clip1 = load(vtx1, VTX_ATTR_CLIPFLAGS);
+  u16<$t4> clip2 = load(vtx2, VTX_ATTR_CLIPFLAGS);
+  u16<$t5> clip3 = load(vtx3, VTX_ATTR_CLIPFLAGS);
+
+  vec16<$v06> vy1 = vall1.y;
+  vec16<$v07> vy2 = vall2.y;
+  vec16<$v08> vy3 = vall3.y;
+
+  // Create a vector of ones.
+  // Do it with an addition (vaddc) so that we also clear
+  // VCO to make sure the first max()/vge does
+  // the right thing if vy1==vy2
+  vec16<$v12> vk1 = VZERO + 1;
+
+  clip1 |= clip2;
+  clip1 |= clip3;
+  undef clip2, clip3;
+
+  // Do a sort-of-three (min, mid, max), using vyN as key of the sort,
+  // and vallN as values to sort. We compare the keys with min/max,
+  // and then use select (vmrg) to apply the swap.
+  u32<$t0> did_swap_0;
+  u32<$t1> did_swap_1;
+  vec16<$v09> vytmp1;
+  vec16<$v10> vytmp2;
+  vec16<$v04> valltmp1;
+  vec16<$v05> valltmp2;
+
+  vytmp1 = max(vy1, vy2);
+  valltmp1 = select(vall1, vall2);
+  vy1 = min(vy1, vy2);
+  vall1 = select(vall1, vall2);
+  did_swap_0 = get_vcc();
+
+  vec16<$v28> vhmlupp;
+  vhmlupp ^= vhmlupp;
+
+  u16<$s7> buffOffset = load(RDPQ_TRI_BUFF_OFFSET);
+
+  // Cull if any plane has all 3 vertices outside (the rejection codes are
+  // stored negated, so the OR of all three is 0xFF if no plane rejects)
+  u32<$t6> rejCodes = clip1 & 0xFF;
+  if(rejCodes != 0xFF)goto JrRa;
+  undef rejCodes;
+
+  vytmp2 = max(vy1, vy3);
+  valltmp2 = select(vall1, vall3);
+  vy1 = min(vy1, vy3);
+  vall1 = select(vall1, vall3);
+  did_swap_1 = get_vcc();
+
+  u32<$a3> triCmd = load(TRI_COMMAND);
+
+  // extract the tile (0-7) from the 3 MSBs of the clip code and merge it
+  // into triCmd. tileIdx lives in $t2 across the whole stretch (like the
+  // ref keeps it in $at, which is reserved in rspl); did_swap_2 uses $t5
+  // instead so the two lifetimes cannot collide.
+  u32<$t2> tileIdx = clip1 >> 13;
+
+  vy3 = max(vytmp1, vytmp2);
+  vall3 = select(valltmp1, valltmp2);
+  vy2 = min(vytmp1, vytmp2);
+  vall2 = select(valltmp1, valltmp2);
+  u32<$t5> did_swap_2 = get_vcc();
+
+  undef vytmp1, vytmp2;
+
+  u32<$t4> clipCodes = clip1 & 0x1F00;
+  u16<$s3> outPtr = buffOffset + CLIP_BUFFER_TMP;
+  @Barrier("tri-out") store(vy1.x, outPtr, 6);
+
+  // If any vertex needs clipping, leave it to the clipping code
+  // (label defined in the file including this one)
+  if(clipCodes != 0)goto RDPQ_Triangle_Clip;
+  undef clipCodes;
+
+  did_swap_0 ^= did_swap_1;
+  did_swap_0 ^= did_swap_2;
+  undef did_swap_1, did_swap_2;
+
+  // Build vhml:
+  //    vhml     =   HX HY MX MY    LX LY  0  NZf
+  vec16<$v24> vhml = vall3 - vall1;
+  undef valltmp1, valltmp2;
+  vec16<$v05> vm = vall2 - vall1; // NOTE: reuses the valltmp regs
+  vec16<$v04> vl = vall3 - vall2;
+
+  // re-fetch the (now sorted) vertex pointers
+  vtx1 = vall1.w;
+  vtx2 = vall2.w;
+  vtx3 = vall3.w;
+
+  // vx12 = X1 -- X2 --  -- -- -- --
+  vec16<$v23> vx12F;
+  vx12F.x = vall1.x;
+  vx12F.z = vall2.x;
+
+  did_swap_0 &= 1;
+  u32<$t1> cullFlip = cull ^ did_swap_0;
+  undef did_swap_0;
+  undef vall1, vall2, vall3;
+
+  // Prepare -MY for the crossprod
+  VTEMP = VZERO - vm.y;
+
+  // FY.e4 = Y1 (s15.16)
+  vec16<$v26> vfyF = vy1 << 14;
+  vec16<$v25> vfyI = vy1 >> 2;
+  buffOffset ^= RDP_CMD_MAX_SIZE;
+
+  @Barrier("tri-out") store(vy2.x, outPtr, 4);
+  @Barrier("tri-out") store(vy3.x, outPtr, 2);
+  undef vy1, vy2, vy3;
+
+  // Cross product for the winding order (and 1/NZ later):
+  // NZ = MX*HY - MY*HX
+  vec16<$v19> vnzF;
+  vec16<$v18> vnzI;
+  vnzF = vm:sint * vhml:sint.y;
+  vnzF = vhml:sint +* VTEMP:sint;
+  vnzI = get_acc_high();
+  vnzF = get_acc_mid();
+
+  // store M/L into the output buffer, load them back into the upper
+  // half of vhml (lanes 2-5), to get all edges into a single register
+
+  // Three-phase fence via two one-way tags: 
+  // the stashed M/L values must be written (tri-oA before) before the combined reload (tri-oA after), 
+  // and only after that reload may the XL/ISL stores overwrite the region (tri-oA2 before/after)
+  @Barrier("tri-oA", before) @Barrier("tri-out") store(vm.xy, outPtr, 8);
+  @Barrier("tri-oA", before) @Barrier("tri-out") store(vl.xy, outPtr, 12);
+  @Barrier("tri-oA", after) @Barrier("tri-oA2", before) vhml.z = load(outPtr, 8).xyzw;
+
+  // Begin calculating DMEM offsets: color_dmem, tex_dmem, z_dmem.
+  // This will happen throughout the whole function
+  u32<$t4> color_dmem = outPtr + 0x20;
+
+  // FY.e0 = floorf(y1) - y1
+  // this is always a negative fraction, so fy_i is always 0xFFFF (or fy_i=fy_f=0)
+  vfyF = VZERO - vfyF;
+  vfyI:sint = vfyI - vfyI;
+
+  vec16<$v08> vwF;
+  vec16<$v07> vwI;
+  vwF.x = load(vtx1, VTX_ATTR_Wf).x;
+  vwF.z = load(vtx2, VTX_ATTR_Wf).x;
+  vwF.X = load(vtx3, VTX_ATTR_Wf).x;
+
+  // Backface culling: sign of NZ vs. the winding of the sorted verts
+  s32<$t0> nzSign = vnzI.x;
+
+  // Prepare a 32-bit number containing the source of the reciprocal.
+  // Notice that we're calculating NR over 1 32-bit input (NZ) and
+  // 3 16-bit inputs (HY, MY, LY), for which we provide 0 in the lower part.
+  // Compute SLOPE vector:
+  // slope    =  1/HY -- 1/MY --   1/LY -- -- 1/NZ
+
+  // Calculate the reciprocal of the normal (32-bit)
+  undef vnzI, vnzF;
+  vec32<$v18> vnz;
+  vec32<$v20> vslope;
+  vslope.W = invert_half(vnz).x;
+  undef vnz;
+
+  // Compute ISH (H slope). 1/HY  (s14.1)
+  vslope.x = invert_half(vhml).y;
+  @Tag("CullFlipA") asm_op("slt", nzSign, nzSign, ZERO);
+  if(nzSign == cullFlip)goto JrRa;
+  undef cullFlip;
+
+  // Merge the NZ halves (still live in $v18/$v19) into vhml/vhmlupp only
+  // after the cull check: the values are dead when culled, and doing it here
+  // lets the scheduler place the two vmovs past the cull exit like the
+  // hand-written ref does.
+  //    vhml      =   HX HY MX MY    LX LY  0  NZf
+  //    vhmlupp   =    0 0  0  0     0  0   0  NZi
+  vec16<$v19> vnzF;
+  vec16<$v18> vnzI;
+  vhml.W = vnzF.x;
+  vhmlupp.W = vnzI.x;
+  undef vnzI, vnzF;
+  // Compute ISM (M slope). 1/MY  (s14.1)
+  vslope.z = invert_half(vm).y;
+  // Compute ISL (L slope). 1/LY  (s14.1)
+  vslope.X = invert_half(vl).y;
+
+  vwI.x = load(vtx1, VTX_ATTR_Wi).x;
+  vwI.z = load(vtx2, VTX_ATTR_Wi).x;
+  vwI.X = load(vtx3, VTX_ATTR_Wi).x;
+
+  ////////////////
+  // 1 NR pass
+  ////////////////
+
+  // Write the left-major flag into triCmd
+  @Tag("CullFlipB") nzSign ^= 1;
+  nzSign <<= 7;
+
+  vec16<$v11> vattr3 = load_vec_u8(vtx3, VTX_ATTR_RGBA);
+  vec16<$v09> vattr1 = load_vec_u8(vtx1, VTX_ATTR_RGBA);
+  vec16<$v10> vattr2 = load_vec_u8(vtx2, VTX_ATTR_RGBA);
+
+  // switch to a 16-bit half view of the slopes for the NR math below
+  undef vslope;
+  vec16<$v21> vslopeF;
+  vec16<$v20> vslopeI;
+
+  // vslopem2  = X/2 * (-4) = -2*X
+  vec16<$v01> vslopem2F = vslopeF:ufract * vmconst:sint.Y;
+  vec16<$v02> vslopem2I = vslopeI:sint +* vmconst:sint.Y;
+
+  // Calculate the minimum W (between e0 and e2)
+  VTEMP = vwF - vwF.z;
+  vwI = min(vwI, vwI.z);
+  triCmd |= nzSign;
+  vwF = select(vwF, vwF.z);
+  undef nzSign;
+
+  vec16<$v15> vinvwF;
+  vec16<$v14> vinvwI;
+  vinvwF.Z = load(vtx3, VTX_ATTR_INVWf).x;
+
+  // NR: R*(X/2)
+  undef vm, vl;
+  vec16<$v03> vtmpF;
+  vec16<$v04> vtmpI;
+  asm_op("vmudl", vtmpF, vslopeF, vhml.yywwYYWW);
+  asm_op("vmadm", vtmpF, vslopeI, vhml.yywwYYWW);
+  vinvwF.X = load(vtx1, VTX_ATTR_INVWf).x;
+  vinvwF.Y = load(vtx2, VTX_ATTR_INVWf).x;
+
+  // Calculate the pointers to color, tex and z attributes, based on triCmd
+  u32<$t5> tex_dmem = triCmd & 0x400;
+  tex_dmem >>= 4;
+
+  vtmpF = vslopeF:ufract +* vhmlupp:sint;
+  vtmpI = vslopeI:sint +* vhmlupp:sint;
+  undef vhmlupp;
+
+  // NR: R*X/2 - 1
+  u32<$t0> negMY = vhml.w;
+  u32<$t1> negHX = vhml.x;
+  vtmpF = vk1:ufract +* vmconst:sint.W;
+  vtmpI = vk1:sint +* vmconst:sint.W;
+  undef vk1;
+
+  // Calculate the minimum W (between e0 and e4)
+  // Now vwI/vwF.e0 contains the minimum W
+  VTEMP = vwF - vwF.X;
+  vwI = min(vwI, vwI.X);
+  vwF = select(vwF, vwF.X);
+
+  vinvwI.Y = load(vtx2, VTX_ATTR_INVWi).x;
+  vinvwI.Z = load(vtx3, VTX_ATTR_INVWi).x;
+  vinvwI.X = load(vtx1, VTX_ATTR_INVWi).x;
+
+  // NR: -2*X * (R*X/2 - 1)
+  //   =  2*X * (1 - R*X/2)
+  //   =    X * (2 - R*X)
+  vec16<$v19> vnzF;
+  vec16<$v18> vnzI;
+  asm_op("vmudl", VTEMP, vtmpF, vslopem2F);
+  asm_op("vmadm", VTEMP, vtmpI, vslopem2F);
+  vnzF = vtmpF:ufract +* vslopem2I:sint;
+  vnzI = vtmpI:sint +* vslopem2I:sint;
+  undef vtmpF, vtmpI, vslopem2F, vslopem2I;
+
+  u32<$t6> z_dmem = triCmd & 0x200;
+  z_dmem >>= 3;
+  tex_dmem += color_dmem;
+
+  // merge the (early-extracted) tile index into triCmd only here, like the
+  // ref: everything before this point reads the pre-tile triCmd (the tile
+  // bits don't overlap any mask used above)
+  triCmd |= tileIdx;
+  undef tileIdx;
+  @Barrier("tri-out") store(triCmd:u16, outPtr, 0);
+  undef clip1;
+
+  // We need to normalize INV_W in [0..1], by dividing them by the maximum INV_W.
+  // We will multiply by W instead. We have now prepared the minimum w in vwI/vwF.e0.
+  //
+  //    vw:     minw -- -- --    ----- ----- ----- --
+  // vinvw:     ---- -- -- --    invw1 invw2 invw3 --
+  //
+  // We need to multiply minw with the three invw. All numbers are positive s16.16,
+  // and the result is known to fit 0..1. By doing a standard 32-bit multiplication
+  // on the RSP, we end up with a positive s16.16 number, where the integer word is
+  // zero. The only exception is when W = 1/W = 1.0. In that case the result of the
+  // multiplication will be 1.0, which means that vinvwF will be 0. To handle
+  // this case, we later subtract 1 from it, so that it becomes 0xffff, which
+  // is a fractional "almost 1".
+  asm_op("vmudl", VTEMP, vinvwF, vwF.x);
+  asm_op("vmadm", VTEMP, vinvwI, vwF.x);
+  vinvwF = vinvwF:ufract +* vwI:sint.x;
+  undef vwI, vwF;
+
+  // Load the S/T coordinates
+  vec16<$v04> vtex1;
+  vec16<$v03> vtex2;
+  vec16<$v06> vtex3;
+  vtex1.XY = load(vtx1, VTX_ATTR_ST).xy;
+  vtex2.XY = load(vtx2, VTX_ATTR_ST).xy;
+  vtex3.XY = load(vtx3, VTX_ATTR_ST).xy;
+
+  // Finalize the slope divisions by multiplying by the reciprocal.
+  // vhml      =   HX  HY   MX  MY     LX   LY   0   NZf
+  //  *
+  // vnz       =  1/HY --  1/MY --    1/LY --   --- 1/NZ
+  //    =
+  // vslope    =  HX/HY --   MX/MY  --   LX/LY  --     --   --
+  VTEMP = vnzF:ufract * vhml:sint;
+  VTEMP = vnzI:sint +* vhml:sint;
+  vslopeF = get_acc_mid();
+  vslopeI = get_acc_high();
+
+  // store negated MY/HX into vhml (for the DX/DY calculation later)
+  negMY = ZERO - negMY;
+  negHX = ZERO - negHX;
+  vhml.w = negMY;
+  vhml.x = negHX;
+  undef negMY, negHX;
+
+  // Subtract INVW by 1. This workarounds an overflow when INVW is exactly 1.0.
+  vinvwF -= 1;
+
+  // Prepare the VCC for the select() later (to merge the tex coords into the attributes)
+  set_vcc(0xCF);
+
+  // vattr now contains only RGBA, loaded via luv. Shift them back to raw bytes.
+  vattr1 >>>= 7;
+  vattr2 >>>= 7;
+  vattr3 >>>= 7;
+
+  // Load the Z components into the attribute vectors
+  vattr1.W = load(vtx1, VTX_ATTR_Z).x;
+  vattr2.W = load(vtx2, VTX_ATTR_Z).x;
+  vattr3.W = load(vtx3, VTX_ATTR_Z).x;
+
+  // Divide vinvwF by 2. This is needed because it is going to be used
+  // in a vmulf which expects a 0.15 number.
+  vinvwF >>>= 1;
+
+  //  vx12  =   X1   --    X2   --       -- --   -- --
+  //  slope = HX/HY  --   MX/MY --     LX/LY --  -- --
+
+  // Compute XH and XM
+  undef vfyI, vfyF;
+  vec32<$v25> vfy;
+  undef vslopeI, vslopeF;
+  vec32<$v20> vslope;
+  vec32<$v16> vedges = vslope * vfy.X;
+
+  u32<$t3> prim_size = triCmd & 0x100;
+  undef triCmd;
+  u32<$t1> dmaBusy = get_dma_busy();
+
+  // Copy the normalized invw into the attribute vectors
+  @Barrier("tri-oB", before) @Barrier("tri-out") store(vinvwF.XYZW, outPtr, 16);
+  @Barrier("tri-oB", after) @Barrier("tri-oB2", before) vattr1.Z = load(outPtr, 16).x;
+  @Barrier("tri-oB", after) @Barrier("tri-oB2", before) vattr2.Z = load(outPtr, 18).x;
+  @Barrier("tri-oB", after) @Barrier("tri-oB2", before) vattr3.Z = load(outPtr, 20).x;
+
+  // Multiply S/T by INVW
+  vtex1:sfract *= vinvwF.xxxxXXXX;
+  vtex2:sfract *= vinvwF.yyyyYYYY;
+  vtex3:sfract *= vinvwF.zzzzZZZZ;
+  undef vinvwI, vinvwF;
+
+  // Convert X1 and X2 into 16.16 precision
+  // vx12 = X1 -- X2 --  -- -- -- --
+  vec16<$v22> vx12I = vx12F >> 2;
+  vx12F <<= 14;
+
+  u8<$t0> syncFull = load(RDPQ_SYNCFULL_ONGOING);
+  
+  @Unlikely if(dmaBusy != 0)
+  {
+    // Slow path: if RSP DMA is still busy by the time we check for it
+    // (which is "as late as possible" within the happy-path), we need to
+    // wait for it to become idle before continuing.
+    // Notice that we only handle one background transfer at the time for
+    // sanity, so we can't really check for COP0_DMA_FULL here.
+    loop {
+      dmaBusy = get_dma_busy();
+    } while(dmaBusy != 0)
+  }
+  undef dmaBusy;
+
+  // z_dmem is only consumed after this point; summed here (instead of next
+  // to the other offset math) so the scheduler may place the addu after the
+  // DMA-wait guard like the hand-written ref.
+  z_dmem += tex_dmem;
+  prim_size >>= 4;
+
+  // Move S/T into the attribute vectors, preserving the other components.
+  // The VCC was set to 0xCF before, so that only the S/T elements (.e4/.e5) are merged.
+  vattr1 = select(vattr1, vtex1);
+  vattr2 = select(vattr2, vtex2);
+  vattr3 = select(vattr3, vtex3);
+  undef vtex1, vtex2, vtex3;
+
+  // Store the X2 value in the output (as XL) and the ISL slope. These
+  // overwrite the M/L stash region, so they wait for its reload (tri-oA2),
+  // but are freely schedulable against each other.
+  @Barrier("tri-oA2", after) @Barrier("tri-out") store(vslope:sint.X, outPtr, 12);    // ISL_I
+  @Barrier("tri-oA2", after) @Barrier("tri-out") store(vx12I.z, outPtr, 8);           // XL_I
+  @Barrier("tri-oA2", after) @Barrier("tri-out") store(vslope:ufract.X, outPtr, 14);  // ISL_F
+
+  undef vtx1, vtx2, vtx3;
+  u32<$a0> rdramCur = load(RDPQ_CURRENT);
+
+  // Finish computing XH/XM by adding X0/X1
+  undef vx12I, vx12F;
+  vec32<$v22> vx12;
+  vedges += vx12.x;
+  undef vx12;
+
+  // Check if SYNC_FULL is ongoing. If it is not, get on with the flow,
+  // otherwise skip writing to DP_END (we can't do that while SYNC_FULL is ongoing).
+  // Writing the current RDRAM pointer to DP_END means anything before that
+  // is already in RAM at this point (because we checked that the DMA is idle),
+  // so the RDP can start processing it.
+  if(syncFull == 0) {
+    set_rdp_end(rdramCur);
+  }
+  undef syncFull;
+
+  // XL_F is stored only after the sync-full check: it has no dependency on
+  // that span, which frees the scheduler to place the store past the skipped
+  // DP_END write like the hand-written ref ($v23 still holds vx12F).
+  vec16<$v23> vx12F;
+  @Barrier("tri-oA2", after) @Barrier("tri-out") store(vx12F.z, outPtr, 10);          // XL_F
+  undef vx12F;
+
+  // Clear the VCO for the attribute subtractions below
+  clear_vcc();
+
+  ////////////////////////////////////////////
+  // ATTRIBUTES
+  ////////////////////////////////////////////
+
+  // MA = A2 - A1
+  // HA = A3 - A1
+  // NOTE: S/T coordinates are kept as s10.5, so they can overflow here.
+  // The subtraction is saturated so the error is minimized.
+  vec16<$v12> vma:sint = vattr2 - vattr1;
+  vec16<$v13> vha:sint = vattr3 - vattr1;
+  undef vattr2, vattr3;
+
+  // Shift left NZ (that contains INVNZ) by 2, to align with the
+  // fixed-point precision that will be required later.
+  undef vnzI, vnzF;
+  vec32<$v18> vnz;
+  vnz = vnz * 4;
+
+  u32<$a2> rdramSentinel = load(RDPQ_SENTINEL);
+
+  // DX = MA * HY + HA * -MY
+  vec16<$v04> vdxF;
+  vec16<$v03> vdxI;
+  VTEMP = vma:sint * vhml:sint.y;
+  VTEMP = vha:sint +* vhml:sint.w;
+  vdxF = get_acc_mid();
+  vdxI = get_acc_high();
+  undef vdxF, vdxI;
+  vec32<$v03> vdx;
+
+  @Barrier("tri-out") store(vslope:sint.z, outPtr, 28);    // ISM_I
+  @Barrier("tri-out") store(vslope:ufract.z, outPtr, 30);  // ISM_F
+
+  @Barrier("tri-out") store(vedges:sint.z, outPtr, 24);    // XM_I
+  @Barrier("tri-out") store(vedges:ufract.z, outPtr, 26);  // XM_F
+  @Barrier("tri-oB2", after) @Barrier("tri-out") store(vedges:sint.x, outPtr, 16);    // XH_I
+  @Barrier("tri-oB2", after) @Barrier("tri-out") store(vedges:ufract.x, outPtr, 18);  // XH_F
+  undef vedges;
+
+  // DY = HA * MX + MA * -HX
+  vec16<$v08> vdyF;
+  vec16<$v07> vdyI;
+  VTEMP = vha:sint * vhml:sint.z;
+  VTEMP = vma:sint +* vhml:sint.x;
+  vdyF = get_acc_mid();
+  vdyI = get_acc_high();
+  undef vdyF, vdyI;
+  vec32<$v07> vdy;
+  undef vma, vha, vhml;
+
+  @Barrier("tri-oB2", after) @Barrier("tri-out") store(vslope:sint.x, outPtr, 20);    // ISH_I
+  @Barrier("tri-oB2", after) @Barrier("tri-out") store(vslope:ufract.x, outPtr, 22);  // ISH_F
+
+  @Barrier("tri-out") set_dma_addr_rsp(outPtr);
+
+  // DX * 1/N
+  vdx *= vnz.W;
+  // DY * 1/N
+  vdy *= vnz.W;
+  undef vnz;
+
+  // Calculate the final output pointer & setup the DMA addresses
+  prim_size += z_dmem;
+  prim_size -= outPtr;
+  outPtr += prim_size;
+  @Barrier("tri-out") set_dma_addr_rdram(rdramCur);
+
+  store(buffOffset, RDPQ_TRI_BUFF_OFFSET);
+  undef buffOffset;
+
+  // Compute the final RDRAM pointer, and check if it goes past the sentinel
+  rdramCur += prim_size;
+
+  // Store the Dx slopes
+  @Barrier("tri-out") store(vdx:ufract.xyzw, color_dmem, 0x18);
+  @Barrier("tri-out") store(vdx:ufract.XYZW, tex_dmem, 0x18);
+  @Barrier("tri-out") store(vdx:sint.xyzw, color_dmem, 0x08);
+  @Barrier("tri-out") store(vdx:sint.XYZW, tex_dmem, 0x08);
+
+  // DE = DX * invsh + DY
+  vec32<$v05> vde = vdx +* vslope.x;
+  undef vslope;
+
+  // Store the Dy slopes
+  @Barrier("tri-out") store(vdy:ufract.xyzw, color_dmem, 0x38);
+  // Kept before the @Unlikely branch so it may fill the delay slot; harmless
+  // on the slow path too (same trick as the hand-written reference).
+  @Barrier("tri-out") store(vdy:ufract.XYZW, tex_dmem, 0x38);
+
+  // Slow path: when the RDRAM buffer is full (we reached the sentinel),
+  // we need to switch buffers. This is basically an inlined version of the
+  // same slow-path in RDPQ_Send. @Unlikely keeps it out-of-line so the
+  // common path falls through instead of branching over it.
+  @Unlikely if(rdramSentinel < rdramCur)
+  {
+    u32<$a3> savedRA = RA;
+    rdramCur = load(RDPQ_DYNAMIC_BUFFERS, 4);
+    u32<$t1> otherBuff = load(RDPQ_DYNAMIC_BUFFERS, 0);
+    store(rdramCur, RDPQ_DYNAMIC_BUFFERS, 0);
+    store(otherBuff, RDPQ_DYNAMIC_BUFFERS, 4);
+    undef otherBuff;
+
+    // We are going to call RSPQCmd_RdpSetBuffer. Since it's going to destroy
+    // t0-t3, we need to save prim_size (t3). Notice that we rely on the fact
+    // that it doesn't destroy t4-t6 (which contain the various DMEM pointers).
+    // As a scratch buffer, we use a part of the primitive buffer that will be
+    // written later, after this branch.
+    @Barrier("cb-stash") store(prim_size:u8, color_dmem, 0x00);
+
+    rdramSentinel = rdramCur + RDPQ_DYNAMIC_BUFFER_SIZE;
+    u32<$a1> rdramCurCopy = rdramCur;
+    RSPQCmd_RdpSetBuffer(rdramCur, rdramCurCopy, rdramSentinel);
+    undef rdramCurCopy;
+
+    // Restore the primitive size that was stashed away, and change the
+    // DMA RDRAM register to use the new buffer instead of the old one.
+    @Barrier("tri-out") set_dma_addr_rdram(rdramCur);
+    @Barrier("cb-stash") prim_size:u8 = load(color_dmem, 0x00);
+    rdramCur += prim_size;
+    RA = savedRA;
+  }
+  undef rdramSentinel;
+
+  // FINAL = vATTR1 + DE * FY
+  VTEMP = vattr1:sint * 1;
+  vec32<$v01> vfinal = vde +* vfy.X;
+  undef vfy, vattr1;
+
+  @Barrier("tri-out") store(vdy:sint.xyzw, color_dmem, 0x28);
+  @Barrier("tri-out") store(vdy:sint.XYZW, tex_dmem, 0x28);
+  // Store the De slopes
+  @Barrier("tri-out") store(vde:ufract.xyzw, color_dmem, 0x30);
+  @Barrier("tri-out") store(vde:ufract.XYZW, tex_dmem, 0x30);
+  @Barrier("tri-out") store(vde:sint.xyzw, color_dmem, 0x20);
+  @Barrier("tri-out") store(vde:sint.XYZW, tex_dmem, 0x20);
+
+  // Store the updated RDRAM pointer
+  store(rdramCur, RDPQ_CURRENT);
+  undef rdramCur;
+
+  // Compact the Z values (int/fract pairs), so that we
+  // can use single 4-byte stores for them below.
+  // (half views of the vec32 slopes for the single-lane moves)
+  undef vdx;
+  vec16<$v04> vdxF;
+  vec16<$v03> vdxI;
+  undef vdy;
+  vec16<$v08> vdyF;
+  vec16<$v07> vdyI;
+  undef vde;
+  vec16<$v06> vdeF;
+  vec16<$v05> vdeI;
+  undef vfinal;
+  vec16<$v02> vfinalF;
+  vec16<$v01> vfinalI;
+  vec16<$v10> vzout;
+
+  vdyF.Z = vdyI.W;
+  vdeF.Z = vdeI.W;
+  vzout.y = vfinalF.W;
+  vzout.x = vfinalI.W;
+  vzout.w = vdxF.W;
+  vzout.z = vdxI.W;
+
+  // Store the Z values
+  @Barrier("tri-out") store(vfinalF.xyzw, color_dmem, 0x10);
+  @Barrier("tri-out") store(vfinalF.XYZW, tex_dmem, 0x10);
+  @Barrier("tri-out") store(vfinalI.xyzw, color_dmem, 0x00);
+  @Barrier("tri-out") store(vfinalI.XYZW, tex_dmem, 0x00);
+
+  // Store the Z slopes, that were compacted before
+  @Barrier("tri-out") store(vdeF.ZW, z_dmem, 0x08);
+  @Barrier("tri-out") store(vdyF.ZW, z_dmem, 0x0C);
+  prim_size -= 1;
+  @Barrier("tri-out") store(vzout.xyzw, z_dmem, 0x00);
+
+  #ifdef T3D_METRICS
+  {
+    u32<$t0> counter = load(SEGMENT_TABLE, 8+4);
+    counter += 1;
+    store(counter, SEGMENT_TABLE, 8+4);
+    undef counter;
+  }
+  #endif
+
+  @Barrier("tri-out", after) set_dma_write(prim_size);
+}
+
+/**
+ * Call this function to correctly terminate a batch of subsequent
+ * calls to RDPQ_Triangle_Send_Async.
+ *
+ * RDPQ_Triangle_Send_Async leaves a RSP DMA running for the last
+ * triangle, to copy it to RDRAM; moreover the RDP is not informed
+ * of it yet. So this function first waits for the DMA to be finished,
+ * and then notifies the RDP that the triangle is ready to be drawn.
+ */
+function RDPQ_Triangle_Send_End()
+{
+  u32<$t2> dmaBusy;
+  u8<$t0> syncFull;
+  u32<$t1> rdramCur;
+  loop {
+    dmaBusy = get_dma_busy();
+    // clear the offset after each explicit wait
+    store(ZERO:u16, RDPQ_TRI_BUFF_OFFSET);
+    syncFull = load(RDPQ_SYNCFULL_ONGOING);
+    rdramCur = load(RDPQ_CURRENT);
+  } while(dmaBusy != 0)
+
+  // Written before the goto so it may fill the branch delay slot: storing
+  // RDPQ_CURRENT is harmless during sync-full, only DP_END must be skipped
+  // (same trick as the hand-written reference).
+  store(rdramCur, RDPQ_CURRENT);
+  if(syncFull != 0)goto JrRa;
+
+  set_rdp_end(rdramCur);
+}

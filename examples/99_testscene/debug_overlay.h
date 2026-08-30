@@ -54,7 +54,7 @@ static void draw_circle_slice(float x, float y, float radius, float startAngle, 
       float angleNext = angle + angleStep;
       float x2 = x + fm_cosf(angleNext) * radius;
       float y2 = y + fm_sinf(angleNext) * radius;
-      rdpq_triangle(&TRIFMT_FILL, (float[]){ x, y }, (float[]){ x1, y1 }, (float[]){ x2, y2 });
+      // rdpq_triangle(&TRIFMT_FILL, (float[]){ x, y }, (float[]){ x1, y1 }, (float[]){ x2, y2 });
       x1 = x2;
       y1 = y2;
     }
